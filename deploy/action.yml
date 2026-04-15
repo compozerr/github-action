@@ -12,9 +12,13 @@ inputs:
     description: 'Environment name to deploy to (defaults to production)'
     required: false
   wait:
-    description: 'Wait for deployment to complete (default: true)'
+    description: 'Wait for deployment to complete (default: false)'
     required: false
-    default: 'true'
+    default: 'false'
+  wait-timeout:
+    description: 'Timeout in seconds when waiting for deployment (default: 600)'
+    required: false
+    default: '600'
   working-directory:
     description: 'Directory containing compozerr.json (default: .)'
     required: false
@@ -28,7 +32,7 @@ outputs:
     description: 'URL to check deployment status'
     value: ${{ steps.deploy.outputs.status-url }}
   status:
-    description: 'Final deployment status (when wait is true)'
+    description: 'Final deployment status'
     value: ${{ steps.deploy.outputs.status }}
 
 runs:
@@ -65,6 +69,7 @@ runs:
       env:
         DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         DEPLOY_WAIT: ${{ inputs.wait }}
+        DEPLOY_TIMEOUT: ${{ inputs.wait-timeout }}
       run: |
         ARGS="--non-interactive --json"
 
@@ -74,12 +79,23 @@ runs:
 
         if [ "$DEPLOY_WAIT" = "true" ]; then
           ARGS="$ARGS --wait"
+          # Run with timeout
+          OUTPUT=$(timeout "${DEPLOY_TIMEOUT}s" compozerr deploy $ARGS 2>&1) || {
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "::warning::Deployment timed out after ${DEPLOY_TIMEOUT}s — it may still be running. Check the Compozerr dashboard."
+              echo "status=timeout" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Deployment failed: $OUTPUT"
+            exit 1
+          }
+        else
+          OUTPUT=$(compozerr deploy $ARGS 2>&1) || {
+            echo "::error::Deployment failed: $OUTPUT"
+            exit 1
+          }
         fi
-
-        OUTPUT=$(compozerr deploy $ARGS 2>&1) || {
-          echo "::error::Deployment failed: $OUTPUT"
-          exit 1
-        }
 
         echo "$OUTPUT"
 
@@ -91,3 +107,8 @@ runs:
         echo "deployment-id=${DEPLOYMENT_ID}" >> "$GITHUB_OUTPUT"
         echo "status-url=${STATUS_URL}" >> "$GITHUB_OUTPUT"
         echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+
+        # Log deployment info
+        if [ -n "$STATUS_URL" ]; then
+          echo "::notice::Deployment initiated — track status at $STATUS_URL"
+        fi
