@@ -34,11 +34,21 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Setup Compozerr (if not already installed)
+    - name: Install Compozerr CLI (if not already installed)
       if: ${{ inputs.token != '' }}
-      uses: ./setup
-      with:
-        token: ${{ inputs.token }}
+      shell: bash
+      run: |
+        if ! command -v compozerr &> /dev/null; then
+          /bin/bash -c "$(curl -fsSL https://compozerr.com/install.sh)"
+          echo "$HOME/.local/compozerr-bin" >> "$GITHUB_PATH"
+        fi
+
+    - name: Authenticate (if token provided)
+      if: ${{ inputs.token != '' }}
+      shell: bash
+      env:
+        COMPOZERR_TOKEN: ${{ inputs.token }}
+      run: compozerr login --token "$COMPOZERR_TOKEN"
 
     - name: Check CLI is available
       shell: bash
@@ -52,14 +62,17 @@ runs:
       id: deploy
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+        DEPLOY_WAIT: ${{ inputs.wait }}
       run: |
         ARGS="--non-interactive --json"
 
-        if [ -n "${{ inputs.environment }}" ]; then
-          ARGS="$ARGS -e '${{ inputs.environment }}'"
+        if [ -n "$DEPLOY_ENVIRONMENT" ]; then
+          ARGS="$ARGS -e $DEPLOY_ENVIRONMENT"
         fi
 
-        if [ "${{ inputs.wait }}" = "true" ]; then
+        if [ "$DEPLOY_WAIT" = "true" ]; then
           ARGS="$ARGS --wait"
         fi
 
