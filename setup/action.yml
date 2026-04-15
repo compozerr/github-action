@@ -1,0 +1,59 @@
+name: 'Setup Compozerr'
+description: 'Install the Compozerr CLI and authenticate with an API token'
+branding:
+  icon: 'terminal'
+  color: 'blue'
+
+inputs:
+  token:
+    description: 'Compozerr API token (cmpz_ prefix). Generate one at Settings > API Tokens.'
+    required: true
+  version:
+    description: 'CLI version to install (default: latest)'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect platform
+      id: platform
+      shell: bash
+      run: |
+        case "$(uname -s)" in
+          Linux*)  os="linux" ;;
+          Darwin*) os="darwin" ;;
+          *) echo "::error::Unsupported OS: $(uname -s)"; exit 1 ;;
+        esac
+        case "$(uname -m)" in
+          x86_64|amd64) arch="x64" ;;
+          arm64|aarch64) arch="arm64" ;;
+          *) echo "::error::Unsupported architecture: $(uname -m)"; exit 1 ;;
+        esac
+        echo "platform=${os}-${arch}" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve version
+      id: version
+      shell: bash
+      run: |
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          VERSION=$(curl -s "https://storage.googleapis.com/compozerr.firebasestorage.app/versions.json?cachebust=$(date +%s)" | jq -r 'max_by(split(".") | map(tonumber))' | tr -d '"')
+        else
+          VERSION="${{ inputs.version }}"
+        fi
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Install Compozerr CLI
+      shell: bash
+      run: |
+        INSTALL_DIR="$HOME/.local/compozerr-bin"
+        mkdir -p "$INSTALL_DIR"
+        DOWNLOAD_URL="https://storage.googleapis.com/compozerr.firebasestorage.app/${{ steps.version.outputs.version }}-${{ steps.platform.outputs.platform }}"
+        echo "Downloading Compozerr CLI v${{ steps.version.outputs.version }}..."
+        curl -sf "$DOWNLOAD_URL" -o "$INSTALL_DIR/compozerr" || { echo "::error::Failed to download CLI binary"; exit 1; }
+        chmod +x "$INSTALL_DIR/compozerr"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Authenticate
+      shell: bash
+      run: compozerr login --token "${{ inputs.token }}"
