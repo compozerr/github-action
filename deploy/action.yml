@@ -1,0 +1,80 @@
+name: 'Deploy with Compozerr'
+description: 'Deploy your project to Compozerr'
+branding:
+  icon: 'upload-cloud'
+  color: 'blue'
+
+inputs:
+  token:
+    description: 'Compozerr API token (cmpz_ prefix). Not required if setup action was already used.'
+    required: false
+  environment:
+    description: 'Environment name to deploy to (defaults to production)'
+    required: false
+  wait:
+    description: 'Wait for deployment to complete (default: true)'
+    required: false
+    default: 'true'
+  working-directory:
+    description: 'Directory containing compozerr.json (default: .)'
+    required: false
+    default: '.'
+
+outputs:
+  deployment-id:
+    description: 'ID of the created deployment'
+    value: ${{ steps.deploy.outputs.deployment-id }}
+  status-url:
+    description: 'URL to check deployment status'
+    value: ${{ steps.deploy.outputs.status-url }}
+  status:
+    description: 'Final deployment status (when wait is true)'
+    value: ${{ steps.deploy.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Compozerr (if not already installed)
+      if: ${{ inputs.token != '' }}
+      uses: ./setup
+      with:
+        token: ${{ inputs.token }}
+
+    - name: Check CLI is available
+      shell: bash
+      run: |
+        if ! command -v compozerr &> /dev/null; then
+          echo "::error::Compozerr CLI not found. Either provide 'token' input or use compozerr/github-action/setup first."
+          exit 1
+        fi
+
+    - name: Deploy
+      id: deploy
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        ARGS="--non-interactive --json"
+
+        if [ -n "${{ inputs.environment }}" ]; then
+          ARGS="$ARGS -e ${{ inputs.environment }}"
+        fi
+
+        if [ "${{ inputs.wait }}" = "true" ]; then
+          ARGS="$ARGS --wait"
+        fi
+
+        OUTPUT=$(compozerr deploy $ARGS 2>&1) || {
+          echo "::error::Deployment failed: $OUTPUT"
+          exit 1
+        }
+
+        echo "$OUTPUT"
+
+        # Parse JSON output for GitHub Action outputs
+        DEPLOYMENT_ID=$(echo "$OUTPUT" | jq -r '.projectId // empty' 2>/dev/null || true)
+        STATUS_URL=$(echo "$OUTPUT" | jq -r '.statusUrl // empty' 2>/dev/null || true)
+        STATUS=$(echo "$OUTPUT" | jq -r '.message // empty' 2>/dev/null || true)
+
+        echo "deployment-id=${DEPLOYMENT_ID}" >> "$GITHUB_OUTPUT"
+        echo "status-url=${STATUS_URL}" >> "$GITHUB_OUTPUT"
+        echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
