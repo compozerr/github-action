@@ -56,7 +56,7 @@ runs:
         ARGS="--non-interactive --json"
 
         if [ -n "${{ inputs.environment }}" ]; then
-          ARGS="$ARGS -e ${{ inputs.environment }}"
+          ARGS="$ARGS -e '${{ inputs.environment }}'"
         fi
 
         if [ "${{ inputs.wait }}" = "true" ]; then
