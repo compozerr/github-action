@@ -47,7 +47,9 @@ Deploys your project to Compozerr. Can optionally install the CLI for you (pass 
 |-------|----------|---------|-------------|
 | `token` | No | -- | Compozerr API token. Not required if the `setup` action was already used in an earlier step. |
 | `environment` | No | -- | Environment name to deploy to. If omitted, deploys to the default production environment. |
-| `wait` | No | `true` | Wait for the deployment to complete before finishing the step. |
+| `wait` | No | `false` | Wait for the deployment to complete before finishing the step. When `true`, the step polls until deployment terminates and dumps deployment logs automatically on failure. |
+| `wait-timeout` | No | `600` | Timeout in seconds when `wait` is `true`. On timeout, the step succeeds with `status=timeout` since the deployment may still finish out-of-band. |
+| `poll-interval` | No | `10` | Status poll interval in seconds when `wait` is `true`. |
 | `working-directory` | No | `.` | Directory containing `compozerr.json`. |
 
 #### Outputs

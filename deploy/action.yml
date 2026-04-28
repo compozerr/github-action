@@ -19,6 +19,10 @@ inputs:
     description: 'Timeout in seconds when waiting for deployment (default: 600)'
     required: false
     default: '600'
+  poll-interval:
+    description: 'Status poll interval in seconds when waiting (default: 10)'
+    required: false
+    default: '10'
   working-directory:
     description: 'Directory containing compozerr.json (default: .)'
     required: false
@@ -70,53 +74,142 @@ runs:
         DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         DEPLOY_WAIT: ${{ inputs.wait }}
         DEPLOY_TIMEOUT: ${{ inputs.wait-timeout }}
+        DEPLOY_POLL_INTERVAL: ${{ inputs.poll-interval }}
       run: |
-        ARGS="--non-interactive --json"
+        set -o pipefail
 
+        # Dump deployment logs as a collapsible group. Best-effort — never fails
+        # the script itself; logs may be unavailable if the deployment was never
+        # accepted by the backend.
+        dump_logs() {
+          local deployment_id="$1"
+          if [ -z "$deployment_id" ]; then
+            return 0
+          fi
+          echo "::group::Deployment logs (compozerr deployment logs $deployment_id)"
+          local logs_output
+          logs_output=$(compozerr deployment logs "$deployment_id" --json --non-interactive 2>&1) || true
+          # Try to format as "timestamp [level] message". Fall back to raw output.
+          if echo "$logs_output" | jq -e '.data.logs' >/dev/null 2>&1; then
+            echo "$logs_output" \
+              | jq -r '.data.logs[]? | "\(.timestamp) [\(.level)] \(.message)"' \
+              || echo "$logs_output"
+          else
+            echo "$logs_output"
+          fi
+          echo "::endgroup::"
+        }
+
+        ARGS="--non-interactive --json"
         if [ -n "$DEPLOY_ENVIRONMENT" ]; then
           ARGS="$ARGS -e $DEPLOY_ENVIRONMENT"
         fi
 
-        if [ "$DEPLOY_WAIT" = "true" ]; then
-          ARGS="$ARGS --wait"
-          # Run with timeout
-          OUTPUT=$(timeout "${DEPLOY_TIMEOUT}s" compozerr deploy $ARGS 2>&1) || {
-            EXIT_CODE=$?
-            if [ $EXIT_CODE -eq 124 ]; then
-              echo "::warning::Deployment timed out after ${DEPLOY_TIMEOUT}s — it may still be running. Check the Compozerr dashboard."
-              echo "status=timeout" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "::error::Deployment failed: $OUTPUT"
-            exit 1
-          }
-        else
-          OUTPUT=$(compozerr deploy $ARGS 2>&1) || {
-            echo "::error::Deployment failed: $OUTPUT"
-            exit 1
-          }
-        fi
+        # Initiate deployment (never use --wait here — we poll ourselves so we
+        # can log progress and auto-dump logs on failure).
+        echo "Starting deployment..."
+        OUTPUT=$(compozerr deploy $ARGS 2>&1) || {
+          echo "::error::Failed to initiate deployment"
+          echo "$OUTPUT"
+          exit 1
+        }
 
         echo "$OUTPUT"
 
         # Older CLI versions emit {"success": false, ...} but exit 0.
-        # Inspect the JSON payload so a failed deploy fails this step.
-        if echo "$OUTPUT" | jq -e 'select(.success == false)' > /dev/null 2>&1; then
-          ERROR_MSG=$(echo "$OUTPUT" | jq -r 'select(.success == false) | .error.message // "Deployment failed"' 2>/dev/null | head -1)
-          echo "::error::Deployment failed: ${ERROR_MSG}"
+        # Use `tostring` to distinguish false from null/missing — `// empty` would coerce both.
+        SUCCESS=$(echo "$OUTPUT" | jq -r '.success | tostring' 2>/dev/null || echo "")
+        if [ "$SUCCESS" = "false" ]; then
+          ERROR_MSG=$(echo "$OUTPUT" | jq -r '.error.message // "Deployment failed"' 2>/dev/null || echo "Deployment failed")
+          echo "::error::Deployment failed: $ERROR_MSG"
+          # No deployment was created — nothing to fetch logs for.
           exit 1
         fi
 
-        # Parse JSON output for GitHub Action outputs
-        DEPLOYMENT_ID=$(echo "$OUTPUT" | jq -r '.projectId // empty' 2>/dev/null || true)
-        STATUS_URL=$(echo "$OUTPUT" | jq -r '.statusUrl // empty' 2>/dev/null || true)
-        STATUS=$(echo "$OUTPUT" | jq -r '.message // empty' 2>/dev/null || true)
+        # Parse deployment metadata. CLI v0.2.x emits { success, data: { projectId, statusUrl, ... } }.
+        # Fall back to top-level fields for older CLI versions.
+        PROJECT_ID=$(echo "$OUTPUT" | jq -r '.data.projectId // .projectId // empty' 2>/dev/null || true)
+        STATUS_URL=$(echo "$OUTPUT" | jq -r '.data.statusUrl // .statusUrl // empty' 2>/dev/null || true)
+
+        DEPLOYMENT_ID=""
+        if [ -n "$STATUS_URL" ]; then
+          DEPLOYMENT_ID=$(echo "$STATUS_URL" | sed -nE 's|.*/deployments/([a-f0-9-]+).*|\1|p' | head -1)
+        fi
 
         echo "deployment-id=${DEPLOYMENT_ID}" >> "$GITHUB_OUTPUT"
         echo "status-url=${STATUS_URL}" >> "$GITHUB_OUTPUT"
-        echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
 
-        # Log deployment info
         if [ -n "$STATUS_URL" ]; then
-          echo "::notice::Deployment initiated — track status at $STATUS_URL"
+          echo ""
+          echo "Your application is currently building..."
+          echo "Track deployment status: $STATUS_URL"
+          echo ""
+          echo "::notice title=Compozerr deployment::Track progress at $STATUS_URL"
         fi
+
+        if [ "$DEPLOY_WAIT" != "true" ]; then
+          echo "status=initiated" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ -z "$DEPLOYMENT_ID" ]; then
+          echo "::error::wait=true was requested but no deployment ID could be derived from the CLI response. Cannot poll status."
+          exit 1
+        fi
+
+        # CLI does the polling now — `compozerr deployment status --wait` blocks
+        # until the deployment reaches a terminal state, emitting status
+        # transitions to stderr (which surfaces in the action log naturally).
+        echo "Waiting for deployment to complete (timeout: ${DEPLOY_TIMEOUT}s, poll: ${DEPLOY_POLL_INTERVAL}s)..."
+
+        WAIT_OUTPUT_FILE=$(mktemp)
+        if compozerr deployment status "$DEPLOYMENT_ID" \
+            --wait \
+            --timeout "$DEPLOY_TIMEOUT" \
+            --poll-interval "$DEPLOY_POLL_INTERVAL" \
+            --json \
+            --non-interactive \
+            > "$WAIT_OUTPUT_FILE"; then
+          # Exit 0 = Completed
+          echo "::notice::Deployment completed successfully"
+          echo "status=Completed" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Exit non-zero = Failed / Cancelled / Timeout. CLI prints the JSON error
+        # response to the file we redirected stdout to.
+        WAIT_OUTPUT=$(cat "$WAIT_OUTPUT_FILE")
+        rm -f "$WAIT_OUTPUT_FILE"
+
+        ERROR_CODE=$(echo "$WAIT_OUTPUT" | jq -r '.error.code // empty' 2>/dev/null || echo "")
+        ERROR_MSG=$(echo "$WAIT_OUTPUT" | jq -r '.error.message // "Deployment did not complete"' 2>/dev/null || echo "Deployment did not complete")
+
+        case "$ERROR_CODE" in
+          "DEPLOYMENT_TIMEOUT")
+            echo "::warning::$ERROR_MSG"
+            dump_logs "$DEPLOYMENT_ID"
+            echo "::notice::Track at: $STATUS_URL"
+            echo "status=timeout" >> "$GITHUB_OUTPUT"
+            # Treat timeout as non-fatal: deployment may still complete out-of-band.
+            exit 0
+            ;;
+          "DEPLOYMENT_FAILED")
+            # CLI's message is "Deployment failed." or "Deployment cancelled."
+            FINAL_STATUS="Failed"
+            if echo "$ERROR_MSG" | grep -qi 'cancelled'; then
+              FINAL_STATUS="Cancelled"
+            fi
+            echo "::error::Deployment $FINAL_STATUS: $ERROR_MSG"
+            dump_logs "$DEPLOYMENT_ID"
+            echo "::notice::View full deployment: $STATUS_URL"
+            echo "status=$FINAL_STATUS" >> "$GITHUB_OUTPUT"
+            exit 1
+            ;;
+          *)
+            echo "::error::Deployment wait failed: $ERROR_MSG"
+            echo "$WAIT_OUTPUT"
+            dump_logs "$DEPLOYMENT_ID"
+            echo "status=Failed" >> "$GITHUB_OUTPUT"
+            exit 1
+            ;;
+        esac
