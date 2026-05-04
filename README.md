@@ -110,7 +110,6 @@ jobs:
       - uses: compozerr/github-action/deploy@v1
         with:
           token: ${{ secrets.COMPOZERR_API_TOKEN }}
-          environment: production
 ```
 
 ### Setup + custom CLI commands
@@ -163,6 +162,29 @@ jobs:
           token: ${{ secrets.COMPOZERR_API_TOKEN }}
           environment: ${{ inputs.environment }}
 ```
+
+### Deploy version tags to production
+
+Deploy immutable release tags to production:
+
+```yaml
+name: Deploy Production
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: compozerr/github-action/deploy@v1
+        with:
+          token: ${{ secrets.COMPOZERR_API_TOKEN }}
+```
+
+Do not override checkout with `ref: main` in tag-triggered workflows. The deploy action verifies the checkout against `GITHUB_SHA` and corrects it when possible so the deployment records and builds the pushed tag commit.
 
 ### Deploy staging on PR, production on merge
 

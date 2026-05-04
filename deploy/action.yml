@@ -66,6 +66,63 @@ runs:
           exit 1
         fi
 
+    - name: Ensure checkout matches workflow ref
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        if [ "${GITHUB_ACTIONS:-}" != "true" ] || [ -z "${GITHUB_SHA:-}" ]; then
+          exit 0
+        fi
+
+        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        CURRENT_SHA=$(git rev-parse HEAD)
+        if [ "$CURRENT_SHA" != "$GITHUB_SHA" ]; then
+          echo "::warning title=Correcting deploy checkout::The repository is checked out at $CURRENT_SHA, but this workflow was triggered for $GITHUB_SHA. Checking out the triggering ref before deploying."
+
+          if [ -n "${GITHUB_REF:-}" ]; then
+            git fetch --force --depth=1 origin "+${GITHUB_REF}:${GITHUB_REF}" || true
+          fi
+          git fetch --force --depth=1 origin "$GITHUB_SHA" || true
+
+          if ! git checkout --force --detach "$GITHUB_SHA"; then
+            echo "::error::Unable to check out the triggering commit $GITHUB_SHA. Remove any checkout 'ref:' override or fetch the triggering ref before running compozerr/github-action/deploy."
+            exit 1
+          fi
+        fi
+
+        UPDATED_SHA=$(git rev-parse HEAD)
+        if [ "$UPDATED_SHA" != "$GITHUB_SHA" ]; then
+          echo "::error::Checkout correction failed: expected $GITHUB_SHA but found $UPDATED_SHA."
+          exit 1
+        fi
+
+        if git symbolic-ref -q HEAD >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        if [ -n "${GITHUB_REF_NAME:-}" ]; then
+          REF_NAME="$GITHUB_REF_NAME"
+        else
+          REF_NAME="${GITHUB_SHA:0:12}"
+        fi
+
+        if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+          DEPLOY_BRANCH="compozerr-deploy-${REF_NAME}"
+        else
+          DEPLOY_BRANCH="$REF_NAME"
+        fi
+
+        DEPLOY_BRANCH=$(printf '%s' "$DEPLOY_BRANCH" | tr -c 'A-Za-z0-9._/-' '-')
+        git update-ref "refs/remotes/origin/${DEPLOY_BRANCH}" "$GITHUB_SHA"
+        git checkout --force -B "$DEPLOY_BRANCH" "$GITHUB_SHA"
+        git config "branch.${DEPLOY_BRANCH}.remote" origin
+        git config "branch.${DEPLOY_BRANCH}.merge" "refs/heads/${DEPLOY_BRANCH}"
+
     - name: Deploy
       id: deploy
       shell: bash
